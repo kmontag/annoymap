@@ -1,0 +1,5 @@
+Total hack.  Intended to be run as a cron job every minute - it'll pop up notifications more or less often depending on how many messages are in your gmail inbox(es).  Ripped from http://google-mail-xoauth-tools.googlecode.com/svn/trunk/python/xoauth.py (you can use that script to generate oauth tokens for your gmail accounts).  To add inboxes, create *.annoy files in ~/.annoymap/ , which should be Yaml-formatted like such:
+
+user: <gmail username>
+oauth_token: <generated oauth token>
+oauth_token_secret: <generated secret>

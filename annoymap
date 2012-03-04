@@ -15,54 +15,9 @@
 # limitations under the License.
 
 
-"""Utilities for XOAUTH authentication.
+"""Annoys you more often depending on how many messages are in your inbox.
 
-This script has the following modes of operation:
-  --generate_oauth_token
-  --generate_xoauth_string
-  --test_imap_authentication
-  --test_smtp_authentication
-
-The --generate_oauth_token mode will generate and authorize an OAuth token for
-testing.
-
-  xoauth --generate_oauth_token --user=xxx@googlemail.com
-
-The script will converse with Google Accounts and generate an oauth request
-token, then present you with a URL you should visit in your browser to authorize
-the token. Once you get the verification code from the website, enter it into
-the script to get your OAuth access token. The output from this command will be
-two values: an OAuth token and an OAuth token secret. These values are reusable,
-so if you save them somewhere you won't have to keep repeating this first step.
-
-The --generate_xoauth_string option generates an XOauth auth string that can
-be fed directly to IMAP or SMTP.
-
-(3-legged OAuth)
-  xoauth --generate_xoauth_string --user=xxx@googlemail.com
-    --oauth_token=k99hfs9dh --oauth_token_secret=sd9fhidfskfj
-
-(2-legged OAuth)
-  xoauth --generate_xoauth_string --user=xxx@googlemail.com
-    --consumer_key=foo.com --consumer_secret=sd9fhidfskfj
-    --xoauth_requestor_id=xxx@googlemail.com
-
-The output of this mode will be a base64-encoded string. To use it, connect to
-imap.googlemail.com:993 and pass it as the second argument to the AUTHENTICATE
-command.
-
-  a AUTHENTICATE XOAUTH a9sha9sfs[...]9dfja929dk==
-
-The --test_imap_authentication and --test_smtp_authentication comands generate
-an XOAUTH string and use them to authenticate to a live IMAP or SMTP server.
-You can use the --imap_hostname and --smtp_hostname options to specify the
-server to connect to.
-
-  xoauth --test_imap_authentication --user=xxx@googlemail.com
-    --oauth_token=k99hfs9dh --oauth_token_secret=sd9fhidfskfj
-
-  xoauth --test_smtp_authentication --user=xxx@googlemail.com
-    --oauth_token=k99hfs9dh --oauth_token_secret=sd9fhidfskfj
+Reads from the ~/.annoymap folder to get usernames/OAuth tokens.
 
 """
 
@@ -76,47 +31,26 @@ import smtplib
 import sys
 import time
 import urllib
+import yaml
+import os
+import glob
+import pynotify
+from datetime import datetime
 
 
 def SetupOptionParser():
   # Usage message is the module's docstring.
   parser = OptionParser(usage=__doc__)
+  parser.add_option('--every_minute_threshold',
+                    default=30,
+                    help='number of messages needed for notifications to show up every minute')
   parser.add_option('--generate_oauth_token',
                     action='store_true',
                     dest='generate_oauth_token',
-                    help='generates an OAuth token for testing')
-  parser.add_option('--generate_xoauth_string',
-                    action='store_true',
-                    dest='generate_xoauth_string',
-                    help='generates an initial client response for XOAUTH')
-  parser.add_option('--test_imap_authentication',
-                    action='store_true',
-                    dest='test_imap_authentication',
-                    help='tests authenticating to IMAP with XOAUTH')
-  parser.add_option('--test_smtp_authentication',
-                    action='store_true',
-                    dest='test_smtp_authentication',
-                    help='tests authenticating to SMTP with XOAUTH')
-  parser.add_option('--oauth_token',
-                    default='',
-                    help='(3-legged OAuth) oauth access token')
-  parser.add_option('--oauth_token_secret',
-                    default='',
-                    help='(3-legged OAuth) oauth access token secret')
-  parser.add_option('--xoauth_request_url_base',
-                    default='https://mail.google.com/',
-                    help='request URL for xoauth request')
-  parser.add_option('--user',
-                    help='email address of user for xoauth request')
-  parser.add_option('--timestamp',
-                    help='optional timestamp for computation. If not supplied, '
-                         'the current time will be used.')
+                    help='generates an OAuth token and stores it to ~/.annoymap')
   parser.add_option('--imap_hostname',
                     default='imap.googlemail.com',
                     help='hostname of IMAP service')
-  parser.add_option('--smtp_hostname',
-                    default='smtp.googlemail.com',
-                    help='hostname of SMTP service')
   return parser
 
 
@@ -336,7 +270,7 @@ def GenerateXOauthString(consumer, access_token, user, proto,
       method,
       request_url_base,
       signed_params)
-  print 'signature base string:\n' + base_string + '\n'
+  #print 'signature base string:\n' + base_string + '\n'
   signature = GenerateOauthSignature(base_string, consumer.secret,
                                      access_token.secret)
   oauth_params['oauth_signature'] = signature
@@ -351,7 +285,7 @@ def GenerateXOauthString(consumer, access_token, user, proto,
   else:
     request_url = request_url_base
   preencoded = '%s %s %s' % (method, request_url, param_list)
-  print 'xoauth string (before base64-encoding):\n' + preencoded + '\n'
+  #print 'xoauth string (before base64-encoding):\n' + preencoded + '\n'
   return preencoded
 
 
@@ -405,7 +339,6 @@ def TestSmtpAuthentication(smtp_hostname, user, xoauth_string):
     xoauth_string: A valid XOAUTH string, as returned by GenerateXOauthString.
         Must not be base64-encoded, since IMAPLIB does its own base64-encoding.
   """
-  print
   smtp_conn = smtplib.SMTP(smtp_hostname, 587)
   smtp_conn.set_debuglevel(True)
   smtp_conn.ehlo('test')
@@ -416,47 +349,48 @@ def TestSmtpAuthentication(smtp_hostname, user, xoauth_string):
 def main(argv):
   options_parser = SetupOptionParser()
   (options, args) = options_parser.parse_args()
-  if not options.user:
-    options_parser.print_help()
-    print "ERROR: --user is required."
-    return
-  consumer = OAuthEntity(options.consumer_key, options.consumer_secret)
-  google_accounts_url_generator = GoogleAccountsUrlGenerator(options.user)
-  if (options.generate_xoauth_string or options.test_imap_authentication or
-      options.test_smtp_authentication):
-    if options.test_smtp_authentication:
-      options.proto = 'smtp'
-    ok_for_3_legged = (options.oauth_token and options.oauth_token_secret)
-    ok_for_2_legged = (options.xoauth_requestor_id and
-                       options.consumer_secret != "anonymous" and
-                       options.consumer_key != "anonymous")
-    if not (ok_for_3_legged or ok_for_2_legged):
-      options_parser.print_help()
-      print 'ERROR: Insufficient parameters.'
-      print 'For 3-legged OAuth, supply --oauth_token and --oauth_token_secret.'
-      print ('For 2-legged OAuth, supply --consumer_key, --consumer_secret, and'
-             '--xoauth_requestor_id')
-      return
-    access_token = OAuthEntity(options.oauth_token, options.oauth_token_secret)
+
+  if not pynotify.init("icon-summary-body"):
+    sys.exit(2)
+  
+  for filename in glob.glob(os.getenv('HOME') + '/.annoymap/*.annoy'):
+    data = yaml.load(open(filename))
+    oauth_token = data['oauth_token']
+    oauth_token_secret = data['oauth_token_secret']
+    user = data['user']
+
+    consumer = OAuthEntity('anonymous', 'anonymous')
+    google_accounts_url_generator = GoogleAccountsUrlGenerator(user)
+
+    access_token = OAuthEntity(oauth_token, oauth_token_secret)
     xoauth_string = GenerateXOauthString(
-        consumer, access_token, options.user, options.proto,
-        options.xoauth_requestor_id, options.nonce, options.timestamp)
-    print 'XOAUTH string (base64-encoded): %s' % base64.b64encode(xoauth_string)
-    if options.test_imap_authentication:
-      TestImapAuthentication(options.imap_hostname, options.user, xoauth_string)
-    if options.test_smtp_authentication:
-      TestSmtpAuthentication(options.smtp_hostname, options.user, xoauth_string)
-  elif options.generate_oauth_token:
-    request_token = GenerateRequestToken(consumer, options.scope, options.nonce,
-                                         options.timestamp,
+        consumer, access_token, user, 'imap', None, None, None)
+    conn = imaplib.IMAP4_SSL(options.imap_hostname)
+    conn.authenticate('XoAUTH', lambda x: xoauth_string)
+
+    count = conn.select('INBOX', True)[1][0]
+    alert = ''
+    for i in range(int(count) / 4):
+      alert += str(count) + " messages in inbox for " + user  + "\n"
+
+    # Figure out whether we should show a notification based on the threshold
+    current_minute = datetime.now().minute
+    if current_minute == 0:
+      current_minute = 60
+    factor = float(count) / float(options.every_minute_threshold)
+    prev = int(factor * (current_minute - 1))
+    curr = int(factor * (current_minute))
+    if prev != curr:
+      notification = pynotify.Notification('WHAT GIVES', alert)
+      notification.show()
+
+  if options.generate_oauth_token:
+    request_token = GenerateRequestToken(consumer, 'https://mail.google.com', None,
+                                         None,
                                          google_accounts_url_generator)
     oauth_verifier = raw_input('Enter verification code: ').strip()
     access_token = GetAccessToken(consumer, request_token, oauth_verifier,
                                   google_accounts_url_generator)
-  else:
-    options_parser.print_help()
-    print 'Nothing to do, exiting.'
-    return
 
 if __name__ == '__main__':
   main(sys.argv)

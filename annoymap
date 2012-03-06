@@ -370,7 +370,7 @@ def main(argv):
 
     count = conn.select('INBOX', True)[1][0]
     alert = ''
-    for i in range(int(count) / 4):
+    for i in range((int(count) / 4) + 1):
       alert += str(count) + " messages in inbox for " + user  + "\n"
 
     # Figure out whether we should show a notification based on the threshold
